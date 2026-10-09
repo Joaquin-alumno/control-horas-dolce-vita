@@ -14,7 +14,7 @@ def get_connection():
     turso_token = st.secrets.get("TURSO_AUTH_TOKEN", os.getenv("TURSO_AUTH_TOKEN"))
     
     if turso_url and turso_token:
-        import libsql_experimental as libsql
+        import libsql
         return libsql.connect(database=turso_url, auth_token=turso_token)
     else:
         return sqlite3.connect("horas_local.db", check_same_thread=False)
