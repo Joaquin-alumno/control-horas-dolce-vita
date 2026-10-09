@@ -1,11 +1,19 @@
 import os
 import sqlite3
 import hashlib
+import datetime
+import calendar
+import io
 import pandas as pd
 import streamlit as st
 
 # Configuración de la página
-st.set_page_config(page_title="Control de Horas - La Dolce Vita", page_icon="⏱️", layout="centered")
+st.set_page_config(page_title="Control de Horas Laborales - La Dolce Vita", page_icon="⏱️", layout="wide")
+
+MESES = [
+    "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+    "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"
+]
 
 # --- CONEXIÓN A LA BASE DE DATOS ---
 def get_connection():
@@ -20,7 +28,7 @@ def get_connection():
 
 conn = get_connection()
 
-# --- CREACIÓN Y MIGRACIÓN DE TABLAS ---
+# --- TABLA DETALLADA ---
 def init_db():
     cursor = conn.cursor()
     cursor.execute("""
@@ -31,29 +39,48 @@ def init_db():
         )
     """)
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS registros (
+        CREATE TABLE IF NOT EXISTS registros_detalle (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             usuario_id INTEGER NOT NULL,
-            fecha DATE NOT NULL,
-            tipo_turno TEXT DEFAULT 'Tarde / Noche 🌙',
-            horas_ordinarias REAL NOT NULL,
-            horas_extra REAL NOT NULL,
+            fecha TEXT NOT NULL,
+            t1_entrada TEXT,
+            t1_salida_real TEXT,
+            t1_salida_oficial TEXT,
+            has_t2 INTEGER DEFAULT 0,
+            t2_entrada TEXT,
+            t2_salida_real TEXT,
+            t2_salida_oficial TEXT,
             notas TEXT,
-            FOREIGN KEY (usuario_id) REFERENCES usuarios (id)
+            UNIQUE(usuario_id, fecha)
         )
     """)
     conn.commit()
-    
-    # Intentar añadir la columna tipo_turno por si proviene de una versión anterior
-    try:
-        cursor.execute("ALTER TABLE registros ADD COLUMN tipo_turno TEXT DEFAULT 'Tarde / Noche 🌙'")
-        conn.commit()
-    except Exception:
-        pass
 
 init_db()
 
-# --- FUNCIONES DE AUTENTICACIÓN ---
+# --- FUNCIONES DE CÁLCULO DE TIEMPO ---
+def calcular_duracion_minutos(e_str, s_str):
+    if not e_str or not s_str:
+        return 0
+    try:
+        h1, m1 = map(int, e_str.strip().split(":"))
+        h2, m2 = map(int, s_str.strip().split(":"))
+        t1 = h1 * 60 + m1
+        t2 = h2 * 60 + m2
+        if t2 < t1:  # Manejo de paso por medianoche
+            t2 += 24 * 60
+        return max(0, t2 - t1)
+    except Exception:
+        return 0
+
+def minutos_a_str(minutos):
+    if minutos <= 0:
+        return ""
+    h = minutos // 60
+    m = minutos % 60
+    return f"{h}h {m:02d}m"
+
+# --- AUTENTICACIÓN ---
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
@@ -79,34 +106,22 @@ def verificar_login(username, password):
     cursor.execute("SELECT id, username FROM usuarios WHERE username = ? AND password = ?", (username, hash_password(password)))
     return cursor.fetchone()
 
-# --- FUNCIONES DE REGISTROS ---
-def agregar_registro(usuario_id, fecha, tipo_turno, h_ord, h_ext, notas):
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO registros (usuario_id, fecha, tipo_turno, horas_ordinarias, horas_extra, notas)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (usuario_id, str(fecha), tipo_turno, h_ord, h_ext, notas))
-    conn.commit()
-
-def obtener_registros(usuario_id):
-    query = "SELECT id, fecha, tipo_turno, horas_ordinarias, horas_extra, notas FROM registros WHERE usuario_id = ? ORDER BY fecha DESC"
-    return pd.read_sql_query(query, conn, params=(usuario_id,))
-
-def eliminar_registro(registro_id, usuario_id):
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM registros WHERE id = ? AND usuario_id = ?", (registro_id, usuario_id))
-    conn.commit()
-
-# --- GESTIÓN DE SESIÓN ---
+# --- CONTROL DE SESIÓN ---
 if "user" not in st.session_state:
     st.session_state.user = None
 
+if "current_year" not in st.session_state:
+    st.session_state.current_year = datetime.date.today().year
+if "current_month" not in st.session_state:
+    st.session_state.current_month = datetime.date.today().month
+if "selected_date" not in st.session_state:
+    st.session_state.selected_date = datetime.date.today()
+
 # --- INTERFAZ DE USUARIO ---
-st.title("⏱️ Control de Horas - La Dolce Vita")
+st.title("Control de Horas Laborales")
 
 if st.session_state.user is None:
     tab1, tab2 = st.tabs(["🔐 Iniciar Sesión", "📝 Crear Cuenta"])
-    
     with tab1:
         st.subheader("Acceso")
         user_input = st.text_input("Usuario")
@@ -119,7 +134,6 @@ if st.session_state.user is None:
                 st.rerun()
             else:
                 st.error("Usuario o contraseña incorrectos.")
-                
     with tab2:
         st.subheader("Registro (Máximo 2 personas)")
         if contar_usuarios() >= 2:
@@ -137,99 +151,226 @@ if st.session_state.user is None:
                 else:
                     st.warning("Rellena todos los campos.")
 else:
-    # --- BARRA LATERAL (CONFIGURACIÓN DE CONTRATO Y USUARIO) ---
-    st.sidebar.write(f"👤 **Usuario:** {st.session_state.user['username']}")
-    
-    st.sidebar.divider()
-    st.sidebar.subheader("📄 Tipo de Contrato")
-    tipo_contrato = st.sidebar.radio(
-        "Selecciona tu jornada contratada:",
-        ["Contrato 25h / semana 📜", "Contrato 30h / semana 📜"]
-    )
-    
-    horas_contrato_semanal = 25.0 if "25h" in tipo_contrato else 30.0
-    
-    st.sidebar.divider()
-    if st.sidebar.button("Cerrar Sesión"):
+    # --- BARRA SUPERIOR DE CONTRATO Y LOGOUT ---
+    col_user, col_logout = st.columns([4, 1])
+    col_user.write(f"👤 **Usuario en sesión:** {st.session_state.user['username']}")
+    if col_logout.button("Cerrar Sesión"):
         st.session_state.user = None
         st.rerun()
-        
-    # --- FORMULARIO PARA REGISTRAR DÍAS ---
-    st.header("Añadir Turno / Día")
-    with st.form("form_horas", clear_on_submit=True):
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            fecha = st.date_input("Fecha")
-            tipo_turno = st.selectbox(
-                "Tipo de Turno",
-                [
-                    "Tarde / Noche 🌙",
-                    "Comida / Mediodía ☀️",
-                    "Turno Partido 🔄",
-                    "Día Libre 🏖️",
-                    "Otro ⏱️"
-                ]
-            )
-            val_ord_def = 0.0 if tipo_turno == "Día Libre 🏖️" else (5.0 if horas_contrato_semanal == 25.0 else 6.0)
-            h_ord = st.number_input("Horas Ordinarias", min_value=0.0, max_value=24.0, step=0.5, value=val_ord_def)
-            
-        with col2:
-            h_ext = st.number_input("Horas Extra", min_value=0.0, max_value=24.0, step=0.5, value=0.0)
-            notas = st.text_input("Notas / Observaciones", placeholder="Ej: Cierre de caja, refuerzo...")
-            
-        submitted = st.form_submit_button("Guardar Día", type="primary")
-        if submitted:
-            horas_finales_ord = 0.0 if tipo_turno == "Día Libre 🏖️" else h_ord
-            agregar_registro(st.session_state.user["id"], fecha, tipo_turno, horas_finales_ord, h_ext, notas)
-            st.success("¡Turno guardado correctamente!")
-            st.rerun()
-            
-    st.divider()
+
+    st.write("---")
+
+    # 1. SELECTOR DE CONTRATO
+    tipo_contrato = st.radio(
+        "📝 **Selector de Contrato:**",
+        ["Contrato 25h/sem (~100h/mes)", "Contrato 30h/sem (~120h/mes)"],
+        horizontal=True
+    )
+    horas_objetivo_mes = 100.0 if "25h" in tipo_contrato else 120.0
+
+    st.write("")
+
+    # 2. CALENDARIO DE TRABAJO
+    st.subheader("📅 Calendario de Trabajo")
     
-    # --- TABLA Y RESUMEN MÉTRICO ---
-    st.header("📋 Tus Registros")
-    df = obtener_registros(st.session_state.user["id"])
+    # Navegación del mes
+    col_prev, col_title, col_next = st.columns([1, 2, 1])
+    if col_prev.button("◀ Mes Anterior", use_container_width=True):
+        if st.session_state.current_month == 1:
+            st.session_state.current_month = 12
+            st.session_state.current_year -= 1
+        else:
+            st.session_state.current_month -= 1
+        st.rerun()
+
+    col_title.markdown(f"<h3 style='text-align: center; margin:0;'>{MESES[st.session_state.current_month - 1]} {st.session_state.current_year}</h3>", unsafe_allow_html=True)
+
+    if col_next.button("Mes Siguiente ▶", use_container_width=True):
+        if st.session_state.current_month == 12:
+            st.session_state.current_month = 1
+            st.session_state.current_year += 1
+        else:
+            st.session_state.current_month += 1
+        st.rerun()
+
+    # Obtener registros del mes actual de la BD
+    cursor = conn.cursor()
+    month_prefix = f"{st.session_state.current_year:04d}-{st.session_state.current_month:02d}"
+    cursor.execute("""
+        SELECT fecha, t1_entrada, t1_salida_real, has_t2, t2_entrada, t2_salida_real
+        FROM registros_detalle
+        WHERE usuario_id = ? AND fecha LIKE ?
+    """, (st.session_state.user["id"], f"{month_prefix}-%"))
+    registros_mes = cursor.fetchall()
+
+    minutos_map = {}
+    for row in registros_mes:
+        f_str, t1_e, t1_sr, has2, t2_e, t2_sr = row
+        m1 = calcular_duracion_minutos(t1_e, t1_sr)
+        m2 = calcular_duracion_minutos(t2_e, t2_sr) if has2 else 0
+        tot = m1 + m2
+        if tot > 0:
+            minutos_map[f_str] = tot
+
+    # Renderizar rejilla del calendario
+    cal = calendar.monthcalendar(st.session_state.current_year, st.session_state.current_month)
+    headers = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
     
-    if not df.empty:
-        total_ord = df['horas_ordinarias'].sum()
-        total_ext = df['horas_extra'].sum()
-        dias_trabajados = len(df[df['tipo_turno'] != 'Día Libre 🏖️'])
-        
-        # Métricas de resumen
-        col_m1, col_m2, col_m3 = st.columns(3)
-        col_m1.metric("Días Trabajados", dias_trabajados)
-        col_m2.metric("Total Horas Ord.", f"{total_ord:.1f} h")
-        col_m3.metric("Total Horas Extra", f"{total_ext:.1f} h")
-        
-        st.caption(f"📌 **Jornada activa:** {tipo_contrato}")
-        
-        # Tabla detallada
-        st.dataframe(
-            df[["fecha", "tipo_turno", "horas_ordinarias", "horas_extra", "notas"]],
-            column_config={
-                "fecha": "Fecha",
-                "tipo_turno": "Turno / Tipo",
-                "horas_ordinarias": "Horas Ord.",
-                "horas_extra": "Horas Extra",
-                "notas": "Notas"
-            },
-            use_container_width=True
-        )
-        
-        # --- SECCIÓN DE BORRADO DE DÍAS ---
-        st.subheader("🗑️ Borrar un Día")
-        opciones_borrado = {
-            f"📅 {row['fecha']} | {row['tipo_turno']} | {row['horas_ordinarias']}h ord.": row['id']
-            for _, row in df.iterrows()
-        }
-        
-        eleccion = st.selectbox("Selecciona el registro que deseas eliminar:", list(opciones_borrado.keys()))
-        
-        if st.button("Eliminar Registro Seleccionado", type="secondary"):
-            registro_id = opciones_borrado[eleccion]
-            eliminar_registro(registro_id, st.session_state.user["id"])
-            st.success("Registro eliminado correctamente.")
-            st.rerun()
-    else:
-        st.info("Aún no tienes horas registradas.")
+    cols_h = st.columns(7)
+    for idx, h in enumerate(headers):
+        cols_h[idx].markdown(f"**{h}**")
+
+    for week in cal:
+        cols_w = st.columns(7)
+        for day_idx, d in enumerate(week):
+            if d == 0:
+                cols_w[day_idx].write("")
+            else:
+                d_obj = datetime.date(st.session_state.current_year, st.session_state.current_month, d)
+                f_str = d_obj.strftime("%Y-%m-%d")
+                tot_m = minutos_map.get(f_str, 0)
+                
+                label_m = f"({minutos_a_str(tot_m)})" if tot_m > 0 else ""
+                btn_label = f"{d}\n{label_m}" if label_m else f"{d}"
+                
+                is_selected = (st.session_state.selected_date == d_obj)
+                btn_type = "primary" if is_selected else "secondary"
+
+                if cols_w[day_idx].button(btn_label, key=f"cal_day_{f_str}", type=btn_type, use_container_width=True):
+                    st.session_state.selected_date = d_obj
+                    st.rerun()
+
+    st.write("---")
+
+    # 3. REGISTRO DEL DÍA SELECCIONADO
+    st.subheader("📝 Registro del Día Seleccionado")
+    
+    sel_date = st.session_state.selected_date
+    f_sel_str = sel_date.strftime("%Y-%m-%d")
+    nombres_dias_es = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+    nombre_dia_sel = nombres_dias_es[sel_date.weekday()]
+    fecha_formateada = sel_date.strftime("%d/%m/%Y")
+
+    st.markdown(f"<h4 style='color: #0044cc;'>Día Seleccionado: {nombre_dia_sel} {fecha_formateada}</h4>", unsafe_allow_html=True)
+
+    # Cargar datos guardados del día si existen
+    cursor.execute("""
+        SELECT t1_entrada, t1_salida_real, t1_salida_oficial, has_t2, t2_entrada, t2_salida_real, t2_salida_oficial, notas
+        FROM registros_detalle
+        WHERE usuario_id = ? AND fecha = ?
+    """, (st.session_state.user["id"], f_sel_str))
+    rec_guardado = cursor.fetchone()
+
+    # Manejo de estado del formulario
+    if "form_loaded_date" not in st.session_state or st.session_state.form_loaded_date != f_sel_str:
+        st.session_state.form_loaded_date = f_sel_str
+        if rec_guardado:
+            st.session_state.val_t1_e = rec_guardado[0] or ""
+            st.session_state.val_t1_sr = rec_guardado[1] or ""
+            st.session_state.val_t1_so = rec_guardado[2] or ""
+            st.session_state.val_has_t2 = bool(rec_guardado[3])
+            st.session_state.val_t2_e = rec_guardado[4] or ""
+            st.session_state.val_t2_sr = rec_guardado[5] or ""
+            st.session_state.val_t2_so = rec_guardado[6] or ""
+            st.session_state.val_notas = rec_guardado[7] or ""
+        else:
+            st.session_state.val_t1_e = ""
+            st.session_state.val_t1_sr = ""
+            st.session_state.val_t1_so = ""
+            st.session_state.val_has_t2 = False
+            st.session_state.val_t2_e = ""
+            st.session_state.val_t2_sr = ""
+            st.session_state.val_t2_so = ""
+            st.session_state.val_notas = ""
+
+    st.write("**TURNO 1 (Mañana / Principal):**")
+    col_t1a, col_t1b, col_t1c = st.columns(3)
+    val_t1_e = col_t1a.text_input("Entrada:", value=st.session_state.val_t1_e, key="in_t1_e")
+    val_t1_sr = col_t1b.text_input("Salida Real:", value=st.session_state.val_t1_sr, key="in_t1_sr")
+    val_t1_so = col_t1c.text_input("Salida Oficial:", value=st.session_state.val_t1_so, key="in_t1_so")
+
+    val_has_t2 = st.checkbox("Activar TURNO 2 (Tarde / Noche - Doble Turno)", value=st.session_state.val_has_t2, key="in_has_t2")
+
+    val_t2_e, val_t2_sr, val_t2_so = "", "", ""
+    if val_has_t2:
+        col_t2a, col_t2b, col_t2c = st.columns(3)
+        val_t2_e = col_t2a.text_input("Entrada (Turno 2):", value=st.session_state.val_t2_e, key="in_t2_e")
+        val_t2_sr = col_t2b.text_input("Salida Real (Turno 2):", value=st.session_state.val_t2_sr, key="in_t2_sr")
+        val_t2_so = col_t2c.text_input("Salida Oficial (Turno 2):", value=st.session_state.val_t2_so, key="in_t2_so")
+
+    val_notas = st.text_input("Notas / Incidencias:", value=st.session_state.val_notas, key="in_notas")
+
+    # Botones de Acción
+    col_act1, col_act2, col_act3 = st.columns(3)
+
+    if col_act1.button("📋 Cargar Horario Habitual", use_container_width=True):
+        dow = sel_date.weekday()
+        if dow in [1, 2, 3]:  # Martes, Miércoles, Jueves
+            st.session_state.val_t1_e = "19:00"
+            st.session_state.val_t1_sr = "23:00"
+            st.session_state.val_t1_so = "23:00"
+            st.session_state.val_has_t2 = False
+            st.session_state.val_t2_e = ""
+            st.session_state.val_t2_sr = ""
+            st.session_state.val_t2_so = ""
+        elif dow == 4:  # Viernes
+            st.session_state.val_t1_e = "12:00"
+            st.session_state.val_t1_sr = "16:00"
+            st.session_state.val_t1_so = "16:00"
+            st.session_state.val_has_t2 = True
+            st.session_state.val_t2_e = "20:00"
+            st.session_state.val_t2_sr = "23:40"
+            st.session_state.val_t2_so = "23:00"
+        elif dow == 5:  # Sábado
+            st.session_state.val_t1_e = "13:00"
+            st.session_state.val_t1_sr = "16:00"
+            st.session_state.val_t1_so = "16:00"
+            st.session_state.val_has_t2 = True
+            st.session_state.val_t2_e = "20:00"
+            st.session_state.val_t2_sr = "23:00"
+            st.session_state.val_t2_so = "23:00"
+        elif dow == 6:  # Domingo
+            st.session_state.val_t1_e = "13:00"
+            st.session_state.val_t1_sr = "16:00"
+            st.session_state.val_t1_so = "16:00"
+            st.session_state.val_has_t2 = False
+            st.session_state.val_t2_e = ""
+            st.session_state.val_t2_sr = ""
+            st.session_state.val_t2_so = ""
+        else:  # Lunes
+            st.session_state.val_t1_e = ""
+            st.session_state.val_t1_sr = ""
+            st.session_state.val_t1_so = ""
+            st.session_state.val_has_t2 = False
+            st.session_state.val_t2_e = ""
+            st.session_state.val_t2_sr = ""
+            st.session_state.val_t2_so = ""
+        st.rerun()
+
+    if col_act2.button("💾 Guardar / Actualizar Día", type="primary", use_container_width=True):
+        cursor.execute("""
+            INSERT OR REPLACE INTO registros_detalle
+            (usuario_id, fecha, t1_entrada, t1_salida_real, t1_salida_oficial, has_t2, t2_entrada, t2_salida_real, t2_salida_oficial, notas)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            st.session_state.user["id"], f_sel_str,
+            val_t1_e, val_t1_sr, val_t1_so,
+            1 if val_has_t2 else 0,
+            val_t2_e, val_t2_sr, val_t2_so,
+            val_notas
+        ))
+        conn.commit()
+        # Actualizar estado de formulario
+        st.session_state.val_t1_e = val_t1_e
+        st.session_state.val_t1_sr = val_t1_sr
+        st.session_state.val_t1_so = val_t1_so
+        st.session_state.val_has_t2 = val_has_t2
+        st.session_state.val_t2_e = val_t2_e
+        st.session_state.val_t2_sr = val_t2_sr
+        st.session_state.val_t2_so = val_t2_so
+        st.session_state.val_notas = val_notas
+        st.success("¡Registro guardado correctamente!")
+        st.rerun()
+
+    if col_act3.button("🗑️ Borrar Día", use_container_width=True):
+        cursor.execute("DELETE FROM registros_detalle
