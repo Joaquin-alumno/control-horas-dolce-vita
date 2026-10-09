@@ -360,7 +360,6 @@ else:
             val_notas
         ))
         conn.commit()
-        # Actualizar estado de formulario
         st.session_state.val_t1_e = val_t1_e
         st.session_state.val_t1_sr = val_t1_sr
         st.session_state.val_t1_so = val_t1_so
@@ -373,4 +372,87 @@ else:
         st.rerun()
 
     if col_act3.button("🗑️ Borrar Día", use_container_width=True):
-        cursor.execute("DELETE FROM registros_detalle
+        cursor.execute("DELETE FROM registros_detalle WHERE usuario_id = ? AND fecha = ?", (st.session_state.user["id"], f_sel_str))
+        conn.commit()
+        st.session_state.val_t1_e = ""
+        st.session_state.val_t1_sr = ""
+        st.session_state.val_t1_so = ""
+        st.session_state.val_has_t2 = False
+        st.session_state.val_t2_e = ""
+        st.session_state.val_t2_sr = ""
+        st.session_state.val_t2_so = ""
+        st.session_state.val_notas = ""
+        st.success("Día eliminado.")
+        st.rerun()
+
+    st.write("---")
+
+    # 4. RESUMEN DE HORAS Y EXPORTACIÓN
+    st.subheader("📊 Resumen de Horas y Exportación")
+
+    col_exp1, col_exp2 = st.columns(2)
+    calc_pressed = col_exp1.button("📊 CALCULAR HORAS MES", use_container_width=True)
+
+    # Generación de archivo Excel
+    cursor.execute("""
+        SELECT fecha, t1_entrada, t1_salida_real, t1_salida_oficial, has_t2, t2_entrada, t2_salida_real, t2_salida_oficial, notas
+        FROM registros_detalle
+        WHERE usuario_id = ? AND fecha LIKE ?
+        ORDER BY fecha ASC
+    """, (st.session_state.user["id"], f"{month_prefix}-%"))
+    todos_registros_mes = cursor.fetchall()
+
+    export_data = []
+    tot_m_real_mes = 0
+    tot_m_oficial_mes = 0
+
+    for r in todos_registros_mes:
+        f_s, t1e, t1sr, t1so, h2, t2e, t2sr, t2so, nts = r
+        m1_r = calcular_duracion_minutos(t1e, t1sr)
+        m1_o = calcular_duracion_minutos(t1e, t1so)
+        m2_r = calcular_duracion_minutos(t2e, t2sr) if h2 else 0
+        m2_o = calcular_duracion_minutos(t2e, t2so) if h2 else 0
+        
+        dr = m1_r + m2_r
+        do = m1_o + m2_o
+        tot_m_real_mes += dr
+        tot_m_oficial_mes += do
+        
+        export_data.append({
+            "Fecha": f_s,
+            "T1 Entrada": t1e,
+            "T1 Salida Real": t1sr,
+            "T1 Salida Oficial": t1so,
+            "T2 Entrada": t2e if h2 else "",
+            "T2 Salida Real": t2sr if h2 else "",
+            "T2 Salida Oficial": t2so if h2 else "",
+            "Horas Reales": minutos_a_str(dr),
+            "Horas Oficiales": minutos_a_str(do),
+            "Notas": nts
+        })
+
+    df_excel = pd.DataFrame(export_data)
+    excel_buffer = io.BytesIO()
+    with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+        df_excel.to_excel(writer, index=False, sheet_name=f"{MESES[st.session_state.current_month - 1]} {st.session_state.current_year}")
+
+    col_exp2.download_button(
+        label="📄 EXPORTAR MES A EXCEL (.xlsx)",
+        data=excel_buffer.getvalue(),
+        file_name=f"Control_Horas_{MESES[st.session_state.current_month - 1]}_{st.session_state.current_year}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True
+    )
+
+    # Mostrar cálculo de horas en pantalla
+    horas_reales_h = tot_m_real_mes / 60.0
+    horas_oficiales_h = tot_m_oficial_mes / 60.0
+    diferencia_h = horas_reales_h - horas_oficiales_h
+    balance_contrato_h = horas_reales_h - horas_objetivo_mes
+
+    st.text_area(
+        "Informe del Mes:",
+        value=(
+            f"--- INFORME DE {MESES[st.session_state.current_month - 1].upper()} {st.session_state.current_year} ---\n"
+            f"• Jornada Seleccionada: {tipo_contrato}\n"
+            f"• Total Horas Reales Trabajas: {minutos_a_str(tot_m_real_mes)} ({
