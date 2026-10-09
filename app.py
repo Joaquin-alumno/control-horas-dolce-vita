@@ -15,7 +15,8 @@ MESES = [
     "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"
 ]
 
-# --- CONEXIÓN A LA BASE DE DATOS ---
+# --- CONEXIÓN A LA BASE DE DATOS (CON CACHÉ DE RECURSO) ---
+@st.cache_resource
 def get_connection():
     turso_url = st.secrets.get("TURSO_DATABASE_URL", os.getenv("TURSO_DATABASE_URL"))
     turso_token = st.secrets.get("TURSO_AUTH_TOKEN", os.getenv("TURSO_AUTH_TOKEN"))
@@ -58,6 +59,28 @@ def init_db():
 
 init_db()
 
+# --- CONSULTAS OPTIMIZADAS CON CACHÉ DE DATOS ---
+@st.cache_data(ttl=300)
+def cargar_registros_mes(usuario_id, month_prefix):
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT fecha, t1_entrada, t1_salida_real, t1_salida_oficial, has_t2, t2_entrada, t2_salida_real, t2_salida_oficial, notas
+        FROM registros_detalle
+        WHERE usuario_id = ? AND fecha LIKE ?
+        ORDER BY fecha ASC
+    """, (usuario_id, f"{month_prefix}-%"))
+    return cursor.fetchall()
+
+@st.cache_data(ttl=300)
+def cargar_dia_especifico(usuario_id, f_sel_str):
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT t1_entrada, t1_salida_real, t1_salida_oficial, has_t2, t2_entrada, t2_salida_real, t2_salida_oficial, notas
+        FROM registros_detalle
+        WHERE usuario_id = ? AND fecha = ?
+    """, (usuario_id, f_sel_str))
+    return cursor.fetchone()
+
 # --- FUNCIONES DE CÁLCULO DE TIEMPO ---
 def calcular_duracion_minutos(e_str, s_str):
     if not e_str or not s_str:
@@ -97,6 +120,7 @@ def registrar_usuario(username, password):
         cursor = conn.cursor()
         cursor.execute("INSERT INTO usuarios (username, password) VALUES (?, ?)", (username, hash_password(password)))
         conn.commit()
+        st.cache_data.clear()
         return True, "Usuario registrado con éxito."
     except Exception:
         return False, "El nombre de usuario ya existe o hubo un error."
@@ -193,19 +217,13 @@ else:
             st.session_state.current_month += 1
         st.rerun()
 
-    # Obtener registros del mes actual de la BD
-    cursor = conn.cursor()
+    # Obtener registros del mes actual usando la caché
     month_prefix = f"{st.session_state.current_year:04d}-{st.session_state.current_month:02d}"
-    cursor.execute("""
-        SELECT fecha, t1_entrada, t1_salida_real, has_t2, t2_entrada, t2_salida_real
-        FROM registros_detalle
-        WHERE usuario_id = ? AND fecha LIKE ?
-    """, (st.session_state.user["id"], f"{month_prefix}-%"))
-    registros_mes = cursor.fetchall()
+    todos_registros_mes = cargar_registros_mes(st.session_state.user["id"], month_prefix)
 
     minutos_map = {}
-    for row in registros_mes:
-        f_str, t1_e, t1_sr, has2, t2_e, t2_sr = row
+    for row in todos_registros_mes:
+        f_str, t1_e, t1_sr, t1_so, has2, t2_e, t2_sr, t2_so, nts = row
         m1 = calcular_duracion_minutos(t1_e, t1_sr)
         m2 = calcular_duracion_minutos(t2_e, t2_sr) if has2 else 0
         tot = m1 + m2
@@ -253,13 +271,8 @@ else:
 
     st.markdown(f"<h4 style='color: #0044cc;'>Día Seleccionado: {nombre_dia_sel} {fecha_formateada}</h4>", unsafe_allow_html=True)
 
-    # Cargar datos guardados del día si existen
-    cursor.execute("""
-        SELECT t1_entrada, t1_salida_real, t1_salida_oficial, has_t2, t2_entrada, t2_salida_real, t2_salida_oficial, notas
-        FROM registros_detalle
-        WHERE usuario_id = ? AND fecha = ?
-    """, (st.session_state.user["id"], f_sel_str))
-    rec_guardado = cursor.fetchone()
+    # Cargar datos guardados del día usando la función en caché
+    rec_guardado = cargar_dia_especifico(st.session_state.user["id"], f_sel_str)
 
     # Manejo de estado del formulario
     if "form_loaded_date" not in st.session_state or st.session_state.form_loaded_date != f_sel_str:
@@ -348,6 +361,7 @@ else:
         st.rerun()
 
     if col_act2.button("💾 Guardar / Actualizar Día", type="primary", use_container_width=True):
+        cursor = conn.cursor()
         cursor.execute("""
             INSERT OR REPLACE INTO registros_detalle
             (usuario_id, fecha, t1_entrada, t1_salida_real, t1_salida_oficial, has_t2, t2_entrada, t2_salida_real, t2_salida_oficial, notas)
@@ -360,6 +374,7 @@ else:
             val_notas
         ))
         conn.commit()
+        st.cache_data.clear()  # Invalida la caché para refrescar el calendario al instante
         st.session_state.val_t1_e = val_t1_e
         st.session_state.val_t1_sr = val_t1_sr
         st.session_state.val_t1_so = val_t1_so
@@ -374,6 +389,7 @@ else:
     if col_act3.button("🗑️ Borrar Día", use_container_width=True):
         cursor.execute("DELETE FROM registros_detalle WHERE usuario_id = ? AND fecha = ?", (st.session_state.user["id"], f_sel_str))
         conn.commit()
+        st.cache_data.clear()  # Invalida la caché para actualizar el calendario al instante
         st.session_state.val_t1_e = ""
         st.session_state.val_t1_sr = ""
         st.session_state.val_t1_so = ""
@@ -392,15 +408,6 @@ else:
 
     col_exp1, col_exp2 = st.columns(2)
     calc_pressed = col_exp1.button("📊 CALCULAR HORAS MES", use_container_width=True)
-
-    # Generación de archivo Excel
-    cursor.execute("""
-        SELECT fecha, t1_entrada, t1_salida_real, t1_salida_oficial, has_t2, t2_entrada, t2_salida_real, t2_salida_oficial, notas
-        FROM registros_detalle
-        WHERE usuario_id = ? AND fecha LIKE ?
-        ORDER BY fecha ASC
-    """, (st.session_state.user["id"], f"{month_prefix}-%"))
-    todos_registros_mes = cursor.fetchall()
 
     export_data = []
     tot_m_real_mes = 0
