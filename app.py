@@ -15,7 +15,7 @@ MESES = [
     "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"
 ]
 
-# --- CONEXIÓN A LA BASE DE DATOS (CON CACHÉ DE RECURSO) ---
+# --- CONEXIÓN A LA BASE DE DATOS ---
 @st.cache_resource
 def get_connection():
     turso_url = st.secrets.get("TURSO_DATABASE_URL", os.getenv("TURSO_DATABASE_URL"))
@@ -29,59 +29,36 @@ def get_connection():
 
 conn = get_connection()
 
-# --- DETECCIÓN DE ENTORNO Y EJECUCIÓN SEGURA ---
-def es_turso():
-    turso_url = st.secrets.get("TURSO_DATABASE_URL", os.getenv("TURSO_DATABASE_URL"))
-    return bool(turso_url)
-
-def ejecutar_sql(query, params=None, fetch_one=False, fetch_all=False, commit=False):
-    if es_turso():
-        if params is not None and len(params) > 0:
-            res = conn.execute(query, params)
-        else:
-            res = conn.execute(query)
-        if commit:
-            try:
-                if hasattr(conn, "commit"):
-                    conn.commit()
-            except Exception:
-                pass
-        if fetch_one:
-            return res.fetchone()
-        if fetch_all:
-            return res.fetchall()
-        return res
-    else:
-        cursor = conn.cursor()
-        if params is not None and len(params) > 0:
-            res = cursor.execute(query, params)
-        else:
-            res = cursor.execute(query)
-        if commit:
-            conn.commit()
-        if fetch_one:
-            return res.fetchone()
-        if fetch_all:
-            return res.fetchall()
-        return res
-
 # --- INICIALIZACIÓN DE TABLAS ---
 def init_db():
-    ejecutar_sql("CREATE TABLE IF NOT EXISTS usuarios (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL, password TEXT NOT NULL)", commit=True)
-    ejecutar_sql("CREATE TABLE IF NOT EXISTS registros_detalle (id INTEGER PRIMARY KEY AUTOINCREMENT, usuario_id INTEGER NOT NULL, fecha TEXT NOT NULL, t1_entrada TEXT, t1_salida_real TEXT, t1_salida_oficial TEXT, has_t2 INTEGER DEFAULT 0, t2_entrada TEXT, t2_salida_real TEXT, t2_salida_oficial TEXT, notas TEXT, UNIQUE(usuario_id, fecha))", commit=True)
+    cursor = conn.cursor()
+    cursor.execute("CREATE TABLE IF NOT EXISTS usuarios (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL, password TEXT NOT NULL)")
+    cursor.execute("CREATE TABLE IF NOT EXISTS registros_detalle (id INTEGER PRIMARY KEY AUTOINCREMENT, usuario_id INTEGER NOT NULL, fecha TEXT NOT NULL, t1_entrada TEXT, t1_salida_real TEXT, t1_salida_oficial TEXT, has_t2 INTEGER DEFAULT 0, t2_entrada TEXT, t2_salida_real TEXT, t2_salida_oficial TEXT, notas TEXT, UNIQUE(usuario_id, fecha))")
+    try:
+        conn.commit()
+    except Exception:
+        pass
 
 init_db()
 
 # --- CONSULTAS OPTIMIZADAS CON CACHÉ DE DATOS ---
 @st.cache_data(ttl=300)
 def cargar_registros_mes(usuario_id, month_prefix):
-    query = "SELECT fecha, t1_entrada, t1_salida_real, t1_salida_oficial, has_t2, t2_entrada, t2_salida_real, t2_salida_oficial, notas FROM registros_detalle WHERE usuario_id = ? AND fecha LIKE ? ORDER BY fecha ASC"
-    return ejecutar_sql(query, (usuario_id, f"{month_prefix}-%"), fetch_all=True)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT fecha, t1_entrada, t1_salida_real, t1_salida_oficial, has_t2, t2_entrada, t2_salida_real, t2_salida_oficial, notas FROM registros_detalle WHERE usuario_id = ? AND fecha LIKE ? ORDER BY fecha ASC",
+        (usuario_id, f"{month_prefix}-%")
+    )
+    return cursor.fetchall()
 
 @st.cache_data(ttl=300)
 def cargar_dia_especifico(usuario_id, f_sel_str):
-    query = "SELECT t1_entrada, t1_salida_real, t1_salida_oficial, has_t2, t2_entrada, t2_salida_real, t2_salida_oficial, notas FROM registros_detalle WHERE usuario_id = ? AND fecha = ?"
-    return ejecutar_sql(query, (usuario_id, f_sel_str), fetch_one=True)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT t1_entrada, t1_salida_real, t1_salida_oficial, has_t2, t2_entrada, t2_salida_real, t2_salida_oficial, notas FROM registros_detalle WHERE usuario_id = ? AND fecha = ?",
+        (usuario_id, f_sel_str)
+    )
+    return cursor.fetchone()
 
 # --- FUNCIONES DE CÁLCULO DE TIEMPO ---
 def calcular_duracion_minutos(e_str, s_str):
@@ -110,21 +87,30 @@ def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
 def contar_usuarios():
-    res = ejecutar_sql("SELECT COUNT(*) FROM usuarios", fetch_one=True)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM usuarios")
+    res = cursor.fetchone()
     return res[0] if res else 0
 
 def registrar_usuario(username, password):
     if contar_usuarios() >= 2:
         return False, "Límite máximo de 2 usuarios alcanzado."
     try:
-        ejecutar_sql("INSERT INTO usuarios (username, password) VALUES (?, ?)", (username, hash_password(password)), commit=True)
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO usuarios (username, password) VALUES (?, ?)", (username, hash_password(password)))
+        try:
+            conn.commit()
+        except Exception:
+            pass
         st.cache_data.clear()
         return True, "Usuario registrado con éxito."
     except Exception:
         return False, "El nombre de usuario ya existe o hubo un error."
 
 def verificar_login(username, password):
-    return ejecutar_sql("SELECT id, username FROM usuarios WHERE username = ? AND password = ?", (username, hash_password(password)), fetch_one=True)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, username FROM usuarios WHERE username = ? AND password = ?", (username, hash_password(password)))
+    return cursor.fetchone()
 
 # --- CONTROL DE SESIÓN ---
 if "user" not in st.session_state:
@@ -357,14 +343,21 @@ else:
         st.rerun()
 
     if col_act2.button("💾 Guardar / Actualizar Día", type="primary", use_container_width=True):
-        query_save = "INSERT OR REPLACE INTO registros_detalle (usuario_id, fecha, t1_entrada, t1_salida_real, t1_salida_oficial, has_t2, t2_entrada, t2_salida_real, t2_salida_oficial, notas) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-        ejecutar_sql(query_save, (
-            st.session_state.user["id"], f_sel_str,
-            val_t1_e, val_t1_sr, val_t1_so,
-            1 if val_has_t2 else 0,
-            val_t2_e, val_t2_sr, val_t2_so,
-            val_notas
-        ), commit=True)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR REPLACE INTO registros_detalle (usuario_id, fecha, t1_entrada, t1_salida_real, t1_salida_oficial, has_t2, t2_entrada, t2_salida_real, t2_salida_oficial, notas) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                st.session_state.user["id"], f_sel_str,
+                val_t1_e, val_t1_sr, val_t1_so,
+                1 if val_has_t2 else 0,
+                val_t2_e, val_t2_sr, val_t2_so,
+                val_notas
+            )
+        )
+        try:
+            conn.commit()
+        except Exception:
+            pass
         st.cache_data.clear()
         st.session_state.val_t1_e = val_t1_e
         st.session_state.val_t1_sr = val_t1_sr
@@ -378,7 +371,12 @@ else:
         st.rerun()
 
     if col_act3.button("🗑️ Borrar Día", use_container_width=True):
-        ejecutar_sql("DELETE FROM registros_detalle WHERE usuario_id = ? AND fecha = ?", (st.session_state.user["id"], f_sel_str), commit=True)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM registros_detalle WHERE usuario_id = ? AND fecha = ?", (st.session_state.user["id"], f_sel_str))
+        try:
+            conn.commit()
+        except Exception:
+            pass
         st.cache_data.clear()
         st.session_state.val_t1_e = ""
         st.session_state.val_t1_sr = ""
@@ -445,4 +443,21 @@ else:
     horas_reales_h = tot_m_real_mes / 60.0
     horas_oficiales_h = tot_m_oficial_mes / 60.0
     diferencia_h = horas_reales_h - horas_oficiales_h
-    balance
+    balance_contrato_h = horas_reales_h - horas_objetivo_mes
+
+    nombre_mes_actual = MESES[st.session_state.current_month - 1].upper()
+    anio_actual = st.session_state.current_year
+    str_horas_reales = minutos_a_str(tot_m_real_mes)
+    str_horas_oficiales = minutos_a_str(tot_m_oficial_mes)
+
+    lineas_informe = [
+        "--- INFORME DE " + str(nombre_mes_actual) + " " + str(anio_actual) + " ---",
+        "• Jornada Seleccionada: " + str(tipo_contrato),
+        "• Total Horas Reales Trabajadas: " + str(str_horas_reales) + " (" + f"{horas_reales_h:.2f}" + " h)",
+        "• Total Horas Oficiales: " + str(str_horas_oficiales) + " (" + f"{horas_oficiales_h:.2f}" + " h)",
+        "• Horas Extra / Exceso de Salida: " + f"{diferencia_h:+.2f}" + " h",
+        "• Balance respecto al Contrato (" + f"{horas_objetivo_mes:.0f}" + "h): " + f"{balance_contrato_h:+.2f}" + " h"
+    ]
+    informe_texto = "\n".join(lineas_informe)
+
+    st.text_area("Informe del Mes:", value=informe_texto, height=140)
