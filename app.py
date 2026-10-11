@@ -58,53 +58,22 @@ def ejecutar_sql(query, params=(), fetch_one=False, fetch_all=False, commit=Fals
             return res.fetchall()
         return res
 
-# --- INICIALIZACIÓN DE TABLAS (SEPARADAS PARA EVITAR ERRORES) ---
+# --- INICIALIZACIÓN DE TABLAS (EN LÍNEA PARA EVITAR ERRORES) ---
 def init_db():
-    ejecutar_sql("""
-        CREATE TABLE IF NOT EXISTS usuarios (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL
-        )
-    """, commit=True)
-    
-    ejecutar_sql("""
-        CREATE TABLE IF NOT EXISTS registros_detalle (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            usuario_id INTEGER NOT NULL,
-            fecha TEXT NOT NULL,
-            t1_entrada TEXT,
-            t1_salida_real TEXT,
-            t1_salida_oficial TEXT,
-            has_t2 INTEGER DEFAULT 0,
-            t2_entrada TEXT,
-            t2_salida_real TEXT,
-            t2_salida_oficial TEXT,
-            notas TEXT,
-            UNIQUE(usuario_id, fecha)
-        )
-    """, commit=True)
+    ejecutar_sql("CREATE TABLE IF NOT EXISTS usuarios (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL, password TEXT NOT NULL)", commit=True)
+    ejecutar_sql("CREATE TABLE IF NOT EXISTS registros_detalle (id INTEGER PRIMARY KEY AUTOINCREMENT, usuario_id INTEGER NOT NULL, fecha TEXT NOT NULL, t1_entrada TEXT, t1_salida_real TEXT, t1_salida_oficial TEXT, has_t2 INTEGER DEFAULT 0, t2_entrada TEXT, t2_salida_real TEXT, t2_salida_oficial TEXT, notas TEXT, UNIQUE(usuario_id, fecha))", commit=True)
 
 init_db()
 
 # --- CONSULTAS OPTIMIZADAS CON CACHÉ DE DATOS ---
 @st.cache_data(ttl=300)
 def cargar_registros_mes(usuario_id, month_prefix):
-    query = """
-        SELECT fecha, t1_entrada, t1_salida_real, t1_salida_oficial, has_t2, t2_entrada, t2_salida_real, t2_salida_oficial, notas
-        FROM registros_detalle
-        WHERE usuario_id = ? AND fecha LIKE ?
-        ORDER BY fecha ASC
-    """
+    query = "SELECT fecha, t1_entrada, t1_salida_real, t1_salida_oficial, has_t2, t2_entrada, t2_salida_real, t2_salida_oficial, notas FROM registros_detalle WHERE usuario_id = ? AND fecha LIKE ? ORDER BY fecha ASC"
     return ejecutar_sql(query, (usuario_id, f"{month_prefix}-%"), fetch_all=True)
 
 @st.cache_data(ttl=300)
 def cargar_dia_especifico(usuario_id, f_sel_str):
-    query = """
-        SELECT t1_entrada, t1_salida_real, t1_salida_oficial, has_t2, t2_entrada, t2_salida_real, t2_salida_oficial, notas
-        FROM registros_detalle
-        WHERE usuario_id = ? AND fecha = ?
-    """
+    query = "SELECT t1_entrada, t1_salida_real, t1_salida_oficial, has_t2, t2_entrada, t2_salida_real, t2_salida_oficial, notas FROM registros_detalle WHERE usuario_id = ? AND fecha = ?"
     return ejecutar_sql(query, (usuario_id, f_sel_str), fetch_one=True)
 
 # --- FUNCIONES DE CÁLCULO DE TIEMPO ---
@@ -381,11 +350,8 @@ else:
         st.rerun()
 
     if col_act2.button("💾 Guardar / Actualizar Día", type="primary", use_container_width=True):
-        ejecutar_sql("""
-            INSERT OR REPLACE INTO registros_detalle
-            (usuario_id, fecha, t1_entrada, t1_salida_real, t1_salida_oficial, has_t2, t2_entrada, t2_salida_real, t2_salida_oficial, notas)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
+        query_save = "INSERT OR REPLACE INTO registros_detalle (usuario_id, fecha, t1_entrada, t1_salida_real, t1_salida_oficial, has_t2, t2_entrada, t2_salida_real, t2_salida_oficial, notas) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        ejecutar_sql(query_save, (
             st.session_state.user["id"], f_sel_str,
             val_t1_e, val_t1_sr, val_t1_so,
             1 if val_has_t2 else 0,
@@ -469,4 +435,24 @@ else:
     )
 
     # Mostrar cálculo de horas en pantalla
-    horas_re
+    horas_reales_h = tot_m_real_mes / 60.0
+    horas_oficiales_h = tot_m_oficial_mes / 60.0
+    diferencia_h = horas_reales_h - horas_oficiales_h
+    balance_contrato_h = horas_reales_h - horas_objetivo_mes
+
+    nombre_mes_actual = MESES[st.session_state.current_month - 1].upper()
+    anio_actual = st.session_state.current_year
+    str_horas_reales = minutos_a_str(tot_m_real_mes)
+    str_horas_oficiales = minutos_a_str(tot_m_oficial_mes)
+
+    lineas_informe = [
+        "--- INFORME DE " + str(nombre_mes_actual) + " " + str(anio_actual) + " ---",
+        "• Jornada Seleccionada: " + str(tipo_contrato),
+        "• Total Horas Reales Trabajadas: " + str(str_horas_reales) + " (" + f"{horas_reales_h:.2f}" + " h)",
+        "• Total Horas Oficiales: " + str(str_horas_oficiales) + " (" + f"{horas_oficiales_h:.2f}" + " h)",
+        "• Horas Extra / Exceso de Salida: " + f"{diferencia_h:+.2f}" + " h",
+        "• Balance respecto al Contrato (" + f"{horas_objetivo_mes:.0f}" + "h): " + f"{balance_contrato_h:+.2f}" + " h"
+    ]
+    informe_texto = "\n".join(lineas_informe)
+
+    st.text_area("Informe del Mes:", value=informe_texto, height=140)
