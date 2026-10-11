@@ -29,57 +29,116 @@ def get_connection():
 
 conn = get_connection()
 
+# --- DETECCIÓN DE ENTORNO Y EJECUCIÓN SEGURA ---
+def es_turso():
+    turso_url = st.secrets.get("TURSO_DATABASE_URL", os.getenv("TURSO_DATABASE_URL"))
+    return bool(turso_url)
+
+def ejecutar_sql(query, params=(), fetch_one=False, fetch_all=False, commit=False):
+    if es_turso():
+        res = conn.execute(query, params)
+        if fetch_one:
+            return res.fetchone()
+        if fetch_all:
+            return res.fetchall()
+        return res
+    else:
+        cursor = conn.cursor()
+        res = cursor.execute(query, params)
+        if commit:
+            conn.commit()
+        if fetch_one:
+            return res.fetchone()
+        if fetch_all:
+            return res.fetchall()
+        return res
+
 # --- TABLA DETALLADA ---
 def init_db():
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS usuarios (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS registros_detalle (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            usuario_id INTEGER NOT NULL,
-            fecha TEXT NOT NULL,
-            t1_entrada TEXT,
-            t1_salida_real TEXT,
-            t1_salida_oficial TEXT,
-            has_t2 INTEGER DEFAULT 0,
-            t2_entrada TEXT,
-            t2_salida_real TEXT,
-            t2_salida_oficial TEXT,
-            notas TEXT,
-            UNIQUE(usuario_id, fecha)
-        )
-    """)
-    conn.commit()
+    if es_turso():
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS usuarios (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                password TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS registros_detalle (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                usuario_id INTEGER NOT NULL,
+                fecha TEXT NOT NULL,
+                t1_entrada TEXT,
+                t1_salida_real TEXT,
+                t1_salida_oficial TEXT,
+                has_t2 INTEGER DEFAULT 0,
+                t2_entrada TEXT,
+                t2_salida_real TEXT,
+                t2_salida_oficial TEXT,
+                notas TEXT,
+                UNIQUE(usuario_id, fecha)
+            )
+        """)
+    else:
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS usuarios (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                password TEXT NOT NULL
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS registros_detalle (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                usuario_id INTEGER NOT NULL,
+                fecha TEXT NOT NULL,
+                t1_entrada TEXT,
+                t1_salida_real TEXT,
+                t1_salida_oficial TEXT,
+                has_t2 INTEGER DEFAULT 0,
+                t2_entrada TEXT,
+                t2_salida_real TEXT,
+                t2_salida_oficial TEXT,
+                notas TEXT,
+                UNIQUE(usuario_id, fecha)
+            )
+        """)
+        conn.commit()
 
 init_db()
 
 # --- CONSULTAS OPTIMIZADAS CON CACHÉ DE DATOS ---
 @st.cache_data(ttl=300)
 def cargar_registros_mes(usuario_id, month_prefix):
-    cursor = conn.cursor()
-    cursor.execute("""
+    query = """
         SELECT fecha, t1_entrada, t1_salida_real, t1_salida_oficial, has_t2, t2_entrada, t2_salida_real, t2_salida_oficial, notas
         FROM registros_detalle
         WHERE usuario_id = ? AND fecha LIKE ?
         ORDER BY fecha ASC
-    """, (usuario_id, f"{month_prefix}-%"))
-    return cursor.fetchall()
+    """
+    if es_turso():
+        res = conn.execute(query, (usuario_id, f"{month_prefix}-%"))
+        return res.fetchall()
+    else:
+        cursor = conn.cursor()
+        res = cursor.execute(query, (usuario_id, f"{month_prefix}-%"))
+        return res.fetchall()
 
 @st.cache_data(ttl=300)
 def cargar_dia_especifico(usuario_id, f_sel_str):
-    cursor = conn.cursor()
-    cursor.execute("""
+    query = """
         SELECT t1_entrada, t1_salida_real, t1_salida_oficial, has_t2, t2_entrada, t2_salida_real, t2_salida_oficial, notas
         FROM registros_detalle
         WHERE usuario_id = ? AND fecha = ?
-    """, (usuario_id, f_sel_str))
-    return cursor.fetchone()
+    """
+    if es_turso():
+        res = conn.execute(query, (usuario_id, f_sel_str))
+        return res.fetchone()
+    else:
+        cursor = conn.cursor()
+        res = cursor.execute(query, (usuario_id, f_sel_str))
+        return res.fetchone()
 
 # --- FUNCIONES DE CÁLCULO DE TIEMPO ---
 def calcular_duracion_minutos(e_str, s_str):
@@ -108,27 +167,21 @@ def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
 def contar_usuarios():
-    cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM usuarios")
-    res = cursor.fetchone()
+    res = ejecutar_sql("SELECT COUNT(*) FROM usuarios", fetch_one=True)
     return res[0] if res else 0
 
 def registrar_usuario(username, password):
     if contar_usuarios() >= 2:
         return False, "Límite máximo de 2 usuarios alcanzado."
     try:
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO usuarios (username, password) VALUES (?, ?)", (username, hash_password(password)))
-        conn.commit()
+        ejecutar_sql("INSERT INTO usuarios (username, password) VALUES (?, ?)", (username, hash_password(password)), commit=True)
         st.cache_data.clear()
         return True, "Usuario registrado con éxito."
     except Exception:
         return False, "El nombre de usuario ya existe o hubo un error."
 
 def verificar_login(username, password):
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, username FROM usuarios WHERE username = ? AND password = ?", (username, hash_password(password)))
-    return cursor.fetchone()
+    return ejecutar_sql("SELECT id, username FROM usuarios WHERE username = ? AND password = ?", (username, hash_password(password)), fetch_one=True)
 
 # --- CONTROL DE SESIÓN ---
 if "user" not in st.session_state:
@@ -361,8 +414,7 @@ else:
         st.rerun()
 
     if col_act2.button("💾 Guardar / Actualizar Día", type="primary", use_container_width=True):
-        cursor = conn.cursor()
-        cursor.execute("""
+        ejecutar_sql("""
             INSERT OR REPLACE INTO registros_detalle
             (usuario_id, fecha, t1_entrada, t1_salida_real, t1_salida_oficial, has_t2, t2_entrada, t2_salida_real, t2_salida_oficial, notas)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -372,9 +424,8 @@ else:
             1 if val_has_t2 else 0,
             val_t2_e, val_t2_sr, val_t2_so,
             val_notas
-        ))
-        conn.commit()
-        st.cache_data.clear()  # Invalida la caché para refrescar el calendario al instante
+        ), commit=True)
+        st.cache_data.clear()
         st.session_state.val_t1_e = val_t1_e
         st.session_state.val_t1_sr = val_t1_sr
         st.session_state.val_t1_so = val_t1_so
@@ -387,9 +438,8 @@ else:
         st.rerun()
 
     if col_act3.button("🗑️ Borrar Día", use_container_width=True):
-        cursor.execute("DELETE FROM registros_detalle WHERE usuario_id = ? AND fecha = ?", (st.session_state.user["id"], f_sel_str))
-        conn.commit()
-        st.cache_data.clear()  # Invalida la caché para actualizar el calendario al instante
+        ejecutar_sql("DELETE FROM registros_detalle WHERE usuario_id = ? AND fecha = ?", (st.session_state.user["id"], f_sel_str), commit=True)
+        st.cache_data.clear()
         st.session_state.val_t1_e = ""
         st.session_state.val_t1_sr = ""
         st.session_state.val_t1_so = ""
