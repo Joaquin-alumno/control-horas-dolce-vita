@@ -29,36 +29,20 @@ def get_connection():
 
 conn = get_connection()
 
-# --- DETECCIÓN DE ENTORNO Y EJECUCIÓN SEGURA ---
-def es_turso():
-    turso_url = st.secrets.get("TURSO_DATABASE_URL", os.getenv("TURSO_DATABASE_URL"))
-    return bool(turso_url)
-
+# --- EJECUCIÓN SQL UNIVERSAL CON CURSOR ---
 def ejecutar_sql(query, params=(), fetch_one=False, fetch_all=False, commit=False):
-    if es_turso():
-        # Turso / libsql ejecuta directo sobre conn
-        res = conn.execute(query, params) if params else conn.execute(query)
-        if commit:
-            try:
-                conn.commit()
-            except Exception:
-                pass
-        if fetch_one:
-            return res.fetchone()
-        if fetch_all:
-            return res.fetchall()
-        return res
-    else:
-        # SQLite local requiere cursor
-        cursor = conn.cursor()
-        res = cursor.execute(query, params) if params else cursor.execute(query)
-        if commit:
+    cursor = conn.cursor()
+    res = cursor.execute(query, params) if params else cursor.execute(query)
+    if commit:
+        try:
             conn.commit()
-        if fetch_one:
-            return res.fetchone()
-        if fetch_all:
-            return res.fetchall()
-        return res
+        except Exception:
+            pass
+    if fetch_one:
+        return res.fetchone()
+    if fetch_all:
+        return res.fetchall()
+    return res
 
 # --- INICIALIZACIÓN DE TABLAS ---
 def init_db():
