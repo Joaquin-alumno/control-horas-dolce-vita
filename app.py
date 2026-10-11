@@ -34,12 +34,16 @@ def es_turso():
     turso_url = st.secrets.get("TURSO_DATABASE_URL", os.getenv("TURSO_DATABASE_URL"))
     return bool(turso_url)
 
-def ejecutar_sql(query, params=(), fetch_one=False, fetch_all=False, commit=False):
+def ejecutar_sql(query, params=None, fetch_one=False, fetch_all=False, commit=False):
     if es_turso():
-        res = conn.execute(query, params)
+        if params is not None and len(params) > 0:
+            res = conn.execute(query, params)
+        else:
+            res = conn.execute(query)
         if commit:
             try:
-                conn.commit()
+                if hasattr(conn, "commit"):
+                    conn.commit()
             except Exception:
                 pass
         if fetch_one:
@@ -49,7 +53,10 @@ def ejecutar_sql(query, params=(), fetch_one=False, fetch_all=False, commit=Fals
         return res
     else:
         cursor = conn.cursor()
-        res = cursor.execute(query, params)
+        if params is not None and len(params) > 0:
+            res = cursor.execute(query, params)
+        else:
+            res = cursor.execute(query)
         if commit:
             conn.commit()
         if fetch_one:
@@ -58,7 +65,7 @@ def ejecutar_sql(query, params=(), fetch_one=False, fetch_all=False, commit=Fals
             return res.fetchall()
         return res
 
-# --- INICIALIZACIÓN DE TABLAS (EN LÍNEA PARA EVITAR ERRORES) ---
+# --- INICIALIZACIÓN DE TABLAS ---
 def init_db():
     ejecutar_sql("CREATE TABLE IF NOT EXISTS usuarios (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL, password TEXT NOT NULL)", commit=True)
     ejecutar_sql("CREATE TABLE IF NOT EXISTS registros_detalle (id INTEGER PRIMARY KEY AUTOINCREMENT, usuario_id INTEGER NOT NULL, fecha TEXT NOT NULL, t1_entrada TEXT, t1_salida_real TEXT, t1_salida_oficial TEXT, has_t2 INTEGER DEFAULT 0, t2_entrada TEXT, t2_salida_real TEXT, t2_salida_oficial TEXT, notas TEXT, UNIQUE(usuario_id, fecha))", commit=True)
@@ -403,9 +410,9 @@ else:
         m2_r = calcular_duracion_minutos(t2e, t2sr) if h2 else 0
         m2_o = calcular_duracion_minutos(t2e, t2so) if h2 else 0
         
-        dr = m1_r + m2_r
+        ger = m1_r + m2_r
         do = m1_o + m2_o
-        tot_m_real_mes += dr
+        tot_m_real_mes += ger
         tot_m_oficial_mes += do
         
         export_data.append({
@@ -416,7 +423,7 @@ else:
             "T2 Entrada": t2e if h2 else "",
             "T2 Salida Real": t2sr if h2 else "",
             "T2 Salida Oficial": t2so if h2 else "",
-            "Horas Reales": minutos_a_str(dr),
+            "Horas Reales": minutos_a_str(ger),
             "Horas Oficiales": minutos_a_str(do),
             "Notas": nts
         })
@@ -438,21 +445,4 @@ else:
     horas_reales_h = tot_m_real_mes / 60.0
     horas_oficiales_h = tot_m_oficial_mes / 60.0
     diferencia_h = horas_reales_h - horas_oficiales_h
-    balance_contrato_h = horas_reales_h - horas_objetivo_mes
-
-    nombre_mes_actual = MESES[st.session_state.current_month - 1].upper()
-    anio_actual = st.session_state.current_year
-    str_horas_reales = minutos_a_str(tot_m_real_mes)
-    str_horas_oficiales = minutos_a_str(tot_m_oficial_mes)
-
-    lineas_informe = [
-        "--- INFORME DE " + str(nombre_mes_actual) + " " + str(anio_actual) + " ---",
-        "• Jornada Seleccionada: " + str(tipo_contrato),
-        "• Total Horas Reales Trabajadas: " + str(str_horas_reales) + " (" + f"{horas_reales_h:.2f}" + " h)",
-        "• Total Horas Oficiales: " + str(str_horas_oficiales) + " (" + f"{horas_oficiales_h:.2f}" + " h)",
-        "• Horas Extra / Exceso de Salida: " + f"{diferencia_h:+.2f}" + " h",
-        "• Balance respecto al Contrato (" + f"{horas_objetivo_mes:.0f}" + "h): " + f"{balance_contrato_h:+.2f}" + " h"
-    ]
-    informe_texto = "\n".join(lineas_informe)
-
-    st.text_area("Informe del Mes:", value=informe_texto, height=140)
+    balance
