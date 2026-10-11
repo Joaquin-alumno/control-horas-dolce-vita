@@ -37,6 +37,11 @@ def es_turso():
 def ejecutar_sql(query, params=(), fetch_one=False, fetch_all=False, commit=False):
     if es_turso():
         res = conn.execute(query, params)
+        if commit:
+            try:
+                conn.commit()
+            except Exception:
+                pass
         if fetch_one:
             return res.fetchone()
         if fetch_all:
@@ -53,58 +58,32 @@ def ejecutar_sql(query, params=(), fetch_one=False, fetch_all=False, commit=Fals
             return res.fetchall()
         return res
 
-# --- TABLA DETALLADA ---
+# --- INICIALIZACIÓN DE TABLAS (SEPARADAS PARA EVITAR ERRORES) ---
 def init_db():
-    if es_turso():
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS usuarios (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT UNIQUE NOT NULL,
-                password TEXT NOT NULL
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS registros_detalle (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                usuario_id INTEGER NOT NULL,
-                fecha TEXT NOT NULL,
-                t1_entrada TEXT,
-                t1_salida_real TEXT,
-                t1_salida_oficial TEXT,
-                has_t2 INTEGER DEFAULT 0,
-                t2_entrada TEXT,
-                t2_salida_real TEXT,
-                t2_salida_oficial TEXT,
-                notas TEXT,
-                UNIQUE(usuario_id, fecha)
-            )
-        """)
-    else:
-        cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS usuarios (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT UNIQUE NOT NULL,
-                password TEXT NOT NULL
-            )
-        """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS registros_detalle (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                usuario_id INTEGER NOT NULL,
-                fecha TEXT NOT NULL,
-                t1_entrada TEXT,
-                t1_salida_real TEXT,
-                t1_salida_oficial TEXT,
-                has_t2 INTEGER DEFAULT 0,
-                t2_entrada TEXT,
-                t2_salida_real TEXT,
-                t2_salida_oficial TEXT,
-                notas TEXT,
-                UNIQUE(usuario_id, fecha)
-            )
-        """)
-        conn.commit()
+    ejecutar_sql("""
+        CREATE TABLE IF NOT EXISTS usuarios (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL
+        )
+    """, commit=True)
+    
+    ejecutar_sql("""
+        CREATE TABLE IF NOT EXISTS registros_detalle (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            usuario_id INTEGER NOT NULL,
+            fecha TEXT NOT NULL,
+            t1_entrada TEXT,
+            t1_salida_real TEXT,
+            t1_salida_oficial TEXT,
+            has_t2 INTEGER DEFAULT 0,
+            t2_entrada TEXT,
+            t2_salida_real TEXT,
+            t2_salida_oficial TEXT,
+            notas TEXT,
+            UNIQUE(usuario_id, fecha)
+        )
+    """, commit=True)
 
 init_db()
 
@@ -117,13 +96,7 @@ def cargar_registros_mes(usuario_id, month_prefix):
         WHERE usuario_id = ? AND fecha LIKE ?
         ORDER BY fecha ASC
     """
-    if es_turso():
-        res = conn.execute(query, (usuario_id, f"{month_prefix}-%"))
-        return res.fetchall()
-    else:
-        cursor = conn.cursor()
-        res = cursor.execute(query, (usuario_id, f"{month_prefix}-%"))
-        return res.fetchall()
+    return ejecutar_sql(query, (usuario_id, f"{month_prefix}-%"), fetch_all=True)
 
 @st.cache_data(ttl=300)
 def cargar_dia_especifico(usuario_id, f_sel_str):
@@ -132,13 +105,7 @@ def cargar_dia_especifico(usuario_id, f_sel_str):
         FROM registros_detalle
         WHERE usuario_id = ? AND fecha = ?
     """
-    if es_turso():
-        res = conn.execute(query, (usuario_id, f_sel_str))
-        return res.fetchone()
-    else:
-        cursor = conn.cursor()
-        res = cursor.execute(query, (usuario_id, f_sel_str))
-        return res.fetchone()
+    return ejecutar_sql(query, (usuario_id, f_sel_str), fetch_one=True)
 
 # --- FUNCIONES DE CÁLCULO DE TIEMPO ---
 def calcular_duracion_minutos(e_str, s_str):
@@ -502,24 +469,4 @@ else:
     )
 
     # Mostrar cálculo de horas en pantalla
-    horas_reales_h = tot_m_real_mes / 60.0
-    horas_oficiales_h = tot_m_oficial_mes / 60.0
-    diferencia_h = horas_reales_h - horas_oficiales_h
-    balance_contrato_h = horas_reales_h - horas_objetivo_mes
-
-    nombre_mes_actual = MESES[st.session_state.current_month - 1].upper()
-    anio_actual = st.session_state.current_year
-    str_horas_reales = minutos_a_str(tot_m_real_mes)
-    str_horas_oficiales = minutos_a_str(tot_m_oficial_mes)
-
-    lineas_informe = [
-        "--- INFORME DE " + str(nombre_mes_actual) + " " + str(anio_actual) + " ---",
-        "• Jornada Seleccionada: " + str(tipo_contrato),
-        "• Total Horas Reales Trabajadas: " + str(str_horas_reales) + " (" + f"{horas_reales_h:.2f}" + " h)",
-        "• Total Horas Oficiales: " + str(str_horas_oficiales) + " (" + f"{horas_oficiales_h:.2f}" + " h)",
-        "• Horas Extra / Exceso de Salida: " + f"{diferencia_h:+.2f}" + " h",
-        "• Balance respecto al Contrato (" + f"{horas_objetivo_mes:.0f}" + "h): " + f"{balance_contrato_h:+.2f}" + " h"
-    ]
-    informe_texto = "\n".join(lineas_informe)
-
-    st.text_area("Informe del Mes:", value=informe_texto, height=140)
+    horas_re
