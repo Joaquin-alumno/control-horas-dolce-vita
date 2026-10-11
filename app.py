@@ -15,34 +15,42 @@ MESES = [
     "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"
 ]
 
-# --- CONEXIÓN A LA BASE DE DATOS (CON CACHÉ DE RECURSO) ---
+# --- CONEXIÓN A LA BASE DE DATABASE ---
 @st.cache_resource
 def get_connection():
     turso_url = st.secrets.get("TURSO_DATABASE_URL", os.getenv("TURSO_DATABASE_URL"))
     turso_token = st.secrets.get("TURSO_AUTH_TOKEN", os.getenv("TURSO_AUTH_TOKEN"))
     
-    if turso_url and turso_token:
-        import libsql
-        return libsql.connect(database=turso_url, auth_token=turso_token)
-    else:
-        return sqlite3.connect("horas_local.db", check_same_thread=False)
+    try:
+        if turso_url and turso_token:
+            import libsql
+            return libsql.connect(database=turso_url, auth_token=turso_token)
+        else:
+            return sqlite3.connect("horas_local.db", check_same_thread=False)
+    except Exception as e:
+        st.error(f"Error crítico al conectar con la base de datos: {e}")
+        st.stop()
 
 conn = get_connection()
 
-# --- EJECUCIÓN SQL UNIVERSAL CON CURSOR ---
+# --- EJECUCIÓN SQL CON CAPTURA DE ERROR REAL ---
 def ejecutar_sql(query, params=(), fetch_one=False, fetch_all=False, commit=False):
-    cursor = conn.cursor()
-    res = cursor.execute(query, params) if params else cursor.execute(query)
-    if commit:
-        try:
-            conn.commit()
-        except Exception:
-            pass
-    if fetch_one:
-        return res.fetchone()
-    if fetch_all:
-        return res.fetchall()
-    return res
+    try:
+        cursor = conn.cursor()
+        res = cursor.execute(query, params) if params else cursor.execute(query)
+        if commit:
+            try:
+                conn.commit()
+            except Exception:
+                pass
+        if fetch_one:
+            return res.fetchone()
+        if fetch_all:
+            return res.fetchall()
+        return res
+    except Exception as e:
+        st.error(f"⚠️ **Fallo SQL en la consulta:** `{query}`\n\n**Parámetros:** `{params}`\n\n**Error exacto:** `{e}`")
+        st.stop()
 
 # --- INICIALIZACIÓN DE TABLAS ---
 def init_db():
@@ -99,8 +107,8 @@ def registrar_usuario(username, password):
         ejecutar_sql("INSERT INTO usuarios (username, password) VALUES (?, ?)", (username, hash_password(password)), commit=True)
         st.cache_data.clear()
         return True, "Usuario registrado con éxito."
-    except Exception:
-        return False, "El nombre de usuario ya existe o hubo un error."
+    except Exception as e:
+        return False, f"Error al registrar: {e}"
 
 def verificar_login(username, password):
     return ejecutar_sql("SELECT id, username FROM usuarios WHERE username = ? AND password = ?", (username, hash_password(password)), fetch_one=True)
